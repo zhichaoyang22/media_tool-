@@ -1,0 +1,35 @@
+# Python虚拟环境
+venv/
+env/
+
+# 模型：忽略u2net，realesr系列模型
+models/u2net.onnx
+models/realesr-*.bin
+models/realesr-*.param
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# 临时缓存
+temp_video_frames/
+tmp_enhance/
+
+# Python编译缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 日志、导出媒体
+*.log
+output/
+*.mp4
+*.gif
+*.png
+*.jpg
+
+# IDE配置
+.idea/
+.vscode/
