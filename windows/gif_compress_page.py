@@ -1,46 +1,39 @@
 import gc
 import numpy as np
 from PIL import Image, ImageFilter
-from rembg import remove
-from rembg.session_factory import new_session
+# =========删掉顶部rembg导入！=========
 from PyQt6.QtWidgets import QWidget, QFileDialog, QMessageBox
 from PyQt6.QtCore import pyqtSignal, QThread, Qt, QTimer
 from PyQt6.QtGui import QImage, QPixmap
 from .ui_gif_compress_page import Ui_GifCompressPage
 
 # ======================全局单例模型会话【强制CPU】======================
-try:
-    sess = new_session("u2net", providers=["CPUExecutionProvider"])
-except Exception as e:
-    sess = None
-    print(f"AI抠图模型加载失败: {e}")
+sess = None
+remove = None  # 新增全局remove变量
 # =====================================================================
-
 class GifCompressThread(QThread):
     progress_signal = pyqtSignal(int)
     single_frame_signal = pyqtSignal(Image.Image)
     finished_signal = pyqtSignal(list)
     log_signal = pyqtSignal(str)
-
-    def __init__(self, frame_list, enable_remove_bg, params):
+    def __init__(self, frame_list, enable_remove_bg, params, rembg_session):
         super().__init__()
         self.frame_list = frame_list
         self.enable_remove_bg = enable_remove_bg
         self.params = params
-
+        self.rembg_session = rembg_session
     def run(self):
         result_frames = []
         total = len(self.frame_list)
         try:
             for idx, frame_pil in enumerate(self.frame_list):
-                if self.enable_remove_bg and sess is not None:
+                if self.enable_remove_bg and self.rembg_session is not None:
                     # AI抠图
-                    out_img = remove(frame_pil, session=sess)
+                    out_img = remove(frame_pil, session=self.rembg_session)
                     # 保留亮线 + Alpha羽化去毛刺
                     out_img = self.keep_lines(frame_pil, out_img)
                 else:
                     out_img = frame_pil.convert("RGBA")
-
                 result_frames.append(out_img)
                 self.single_frame_signal.emit(out_img)
                 self.progress_signal.emit(int((idx + 1) / total * 100))
@@ -49,13 +42,11 @@ class GifCompressThread(QThread):
             self.log_signal.emit("✅ GIF抠图处理全部完成")
         except Exception as err:
             self.log_signal.emit(f"❌ 处理异常：{str(err)}")
-
     def keep_lines(self, original_pil, ai_pil):
         """保留原图高亮线条，Alpha通道高斯羽化消除边缘毛刺"""
         src = np.array(original_pil.convert("RGBA"), dtype=np.float32)
         dst = np.array(ai_pil.convert("RGBA"), dtype=np.float32)
         r, g, b, a = src[..., 0], src[..., 1], src[..., 2], src[..., 3]
-
         # 亮线识别规则
         yellow_line = (r > 160) & (g > 110) & (b < 130)
         white_line = (r > 220) & (g > 220) & (b > 220)
@@ -63,13 +54,11 @@ class GifCompressThread(QThread):
         bright_line = (brightness > 180) & (r > 140) & (g > 140)
         blue_bg_yellow = (b > 120) & (r > 180) & (g > 140)
         line_mask = yellow_line | white_line | bright_line | blue_bg_yellow
-
         # 线条区域强制使用原图颜色，不透明
         dst[..., 0] = np.where(line_mask, r, dst[..., 0])
         dst[..., 1] = np.where(line_mask, g, dst[..., 1])
         dst[..., 2] = np.where(line_mask, b, dst[..., 2])
         dst[..., 3] = np.where(line_mask, 255, dst[..., 3])
-
         img = Image.fromarray(dst.astype(np.uint8), mode="RGBA")
         # Alpha通道单独高斯羽化，去除毛刺
         alpha_channel = img.split()[3]
@@ -77,13 +66,11 @@ class GifCompressThread(QThread):
         img.putalpha(alpha_channel)
         return img
 
-
 class GifCompressPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.ui = Ui_GifCompressPage()
         self.ui.setupUi(self)
-
         self.raw_frames = []
         self.frame_durations = []
         self.processed_frames = []
@@ -91,25 +78,37 @@ class GifCompressPage(QWidget):
         self.play_timer = QTimer()
         self.play_timer.timeout.connect(self.play_next_frame)
         self.enable_ai_bg_remove = False
-
-        # ==========修复点：绑定方法名和定义保持一致 go_back_home ==========
+        # ==========绑定按钮==========
         self.ui.btn_open.clicked.connect(self.open_gif)
         self.ui.btn_export.clicked.connect(self.export_gif)
         self.ui.btn_play.clicked.connect(self.toggle_play)
         self.ui.btn_ai_remove_bg.clicked.connect(self.toggle_ai_remove_bg)
         self.ui.btn_back.clicked.connect(self.go_back_home)
-
         # 滑块联动
         self.ui.slider_threshold.valueChanged.connect(self.on_thresh_slider_change)
         self.ui.slider_frame.valueChanged.connect(self.on_frame_slider_change)
         self.ui.label_thresh.setText(f"抠图阈值: {self.ui.slider_threshold.value()}")
         self.ui.label_fps.setText(f"帧间隔: {self.ui.slider_frame.value()/10:.1f}s")
-
     def go_back_home(self):
         # 返回首页，切换stackedWidget页面
         self.parent().setCurrentIndex(0)
 
     def toggle_ai_remove_bg(self):
+        global sess, remove
+        # =====第一次开启抠图的时候，才import rembg + 加载模型=====
+        if sess is None:
+            try:
+                # 字符串动态导入，规避pyinstaller静态扫描
+                rembg_mod = __import__("rembg")
+                remove = rembg_mod.remove
+                session_factory_mod = __import__("rembg.session_factory")
+                new_session = session_factory_mod.session_factory.new_session
+
+                sess = new_session("u2net", providers=["CPUExecutionProvider"])
+                self.ui.log_text.append("✅ AI抠图模型加载完成")
+            except Exception as e:
+                self.ui.log_text.append(f"❌ AI抠图模型加载失败: {e}")
+                return
         self.enable_ai_bg_remove = not self.enable_ai_bg_remove
         if self.enable_ai_bg_remove:
             self.ui.btn_ai_remove_bg.setText("关闭透明抠图")
@@ -120,25 +119,21 @@ class GifCompressPage(QWidget):
 
     def on_thresh_slider_change(self, val):
         self.ui.label_thresh.setText(f"抠图阈值: {val}")
-
     def on_frame_slider_change(self, val):
         sec = val / 10
         self.ui.label_fps.setText(f"帧间隔: {sec:.1f}s")
         if self.play_timer.isActive():
             self.play_timer.setInterval(int(sec*1000))
-
     def pil_to_qimage(self, pil_img):
         """PIL.Image转QImage，支持RGBA透明"""
         pil_img = pil_img.convert("RGBA")
         data = pil_img.tobytes("raw", "RGBA")
         qimg = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
         return qimg
-
     def show_pil_to_label(self, pil_img, label):
         qimg = self.pil_to_qimage(pil_img)
         scaled_img = qimg.scaled(label.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         label.setPixmap(QPixmap.fromImage(scaled_img))
-
     def open_gif(self):
         path, _ = QFileDialog.getOpenFileName(self, "打开GIF", "", "GIF Files (*.gif)")
         if not path:
@@ -160,7 +155,6 @@ class GifCompressPage(QWidget):
             self.ui.log_text.append(f"✅ 成功载入GIF，总帧数：{len(self.raw_frames)}")
         except Exception as e:
             self.ui.log_text.append(f"❌ 打开失败：{str(e)}")
-
     def toggle_play(self):
         if self.play_timer.isActive():
             self.play_timer.stop()
@@ -169,7 +163,6 @@ class GifCompressPage(QWidget):
             interval = int(self.ui.slider_frame.value() /10 * 1000)
             self.play_timer.start(interval)
             self.ui.btn_play.setText("暂停")
-
     def play_next_frame(self):
         if not self.processed_frames:
             return
@@ -178,8 +171,8 @@ class GifCompressPage(QWidget):
         self.play_idx += 1
         if self.play_idx >= len(self.processed_frames):
             self.play_idx = 0
-
     def start_process(self):
+        global sess
         if not self.raw_frames:
             self.ui.log_text.append("⚠️ 请先打开GIF文件")
             return
@@ -189,26 +182,21 @@ class GifCompressPage(QWidget):
             "height": self.ui.spin_h.value(),
             "threshold": self.ui.slider_threshold.value()
         }
-        self.thread = GifCompressThread(self.raw_frames, self.enable_ai_bg_remove, params)
+        self.thread = GifCompressThread(self.raw_frames, self.enable_remove_bg, params, sess)
         self.thread.single_frame_signal.connect(self.on_single_frame)
         self.thread.progress_signal.connect(self.on_progress)
         self.thread.finished_signal.connect(self.on_process_finish)
         self.thread.log_signal.connect(self.on_log)
         self.thread.start()
-
     def on_single_frame(self, pil_img):
         self.show_pil_to_label(pil_img, self.ui.label_result)
-
     def on_progress(self, val):
         self.ui.log_text.append(f"处理进度：{val}%")
-
     def on_process_finish(self, frames):
         self.processed_frames = frames
         self.ui.log_text.append("✅ 全部帧处理完成，可以导出GIF")
-
     def on_log(self, msg):
         self.ui.log_text.append(msg)
-
     def export_gif(self):
         if not self.processed_frames:
             self.ui.log_text.append("⚠️ 请先完成GIF抠图处理")

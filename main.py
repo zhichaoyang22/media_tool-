@@ -1,4 +1,6 @@
-# main.py
+# 第一行！！最先执行补丁
+import preload_patch
+
 import sys
 from PyQt6.QtWidgets import QApplication
 from windows import HomeWindow
